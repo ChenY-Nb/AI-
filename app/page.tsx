@@ -39,6 +39,8 @@ type Habit = "sleep_early" | "walking" | "less_sitting";
 type FailureReason = "forgot" | "no_time" | "too_tired" | "no_motivation";
 type ReminderChoice = "yes" | "no";
 type CheckinStatus = "done" | "partial" | "missed";
+type HistoryView = "all" | "checkins" | "adjustments" | "risks";
+type RiskLevelFilter = "all" | "high" | "medium" | "low";
 
 type FormState = {
   habit: Habit;
@@ -96,6 +98,14 @@ type HistoryRiskEvent = {
   risk_type: string;
   trigger_text: string;
   action_text: string;
+};
+
+type TrendItem = {
+  key: string;
+  label: string;
+  total: number;
+  done: number;
+  risk: number;
 };
 
 function StepBadge({
@@ -181,6 +191,133 @@ function formatDateTime(value: string) {
   }
 }
 
+function formatDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatDayLabel(date: Date) {
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+function buildWeeklyTrend(
+  checkins: HistoryCheckin[],
+  risks: HistoryRiskEvent[]
+): TrendItem[] {
+  const today = new Date();
+  const days: TrendItem[] = [];
+
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+
+    const key = formatDateKey(d);
+    days.push({
+      key,
+      label: formatDayLabel(d),
+      total: 0,
+      done: 0,
+      risk: 0,
+    });
+  }
+
+  const dayMap = new Map(days.map((item) => [item.key, item]));
+
+  for (const item of checkins) {
+    const key = formatDateKey(new Date(item.created_at));
+    const target = dayMap.get(key);
+    if (!target) continue;
+
+    target.total += 1;
+    if (item.checkin_status === "done") {
+      target.done += 1;
+    }
+  }
+
+  for (const item of risks) {
+    const key = formatDateKey(new Date(item.created_at));
+    const target = dayMap.get(key);
+    if (!target) continue;
+
+    target.risk += 1;
+  }
+
+  return days;
+}
+
+function MiniTrendChart({ data }: { data: TrendItem[] }) {
+  const maxValue = Math.max(
+    1,
+    ...data.flatMap((item) => [item.total, item.done, item.risk])
+  );
+
+  return (
+    <div className="rounded-2xl border bg-white p-5">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-lg font-semibold">最近 7 天趋势</div>
+          <div className="text-sm text-gray-500">
+            数据源：最近 30 天记录，展示近 7 天变化。黑色 = 打卡总数，灰色 =
+            完成数，红点 = 风险事件数
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-7 gap-3">
+        {data.map((item) => {
+          const totalHeight = (item.total / maxValue) * 120;
+          const doneHeight = (item.done / maxValue) * 120;
+
+          return (
+            <div key={item.key} className="flex flex-col items-center gap-2">
+              <div className="flex h-36 items-end gap-1">
+                <div className="flex flex-col items-center gap-1">
+                  <div className="text-[10px] text-gray-500">{item.total}</div>
+                  <div
+                    className="w-4 rounded-t-md bg-black"
+                    style={{
+                      height: `${Math.max(
+                        totalHeight,
+                        item.total > 0 ? 8 : 0
+                      )}px`,
+                    }}
+                    title={`打卡总数: ${item.total}`}
+                  />
+                </div>
+
+                <div className="flex flex-col items-center gap-1">
+                  <div className="text-[10px] text-gray-500">{item.done}</div>
+                  <div
+                    className="w-4 rounded-t-md bg-gray-400"
+                    style={{
+                      height: `${Math.max(doneHeight, item.done > 0 ? 8 : 0)}px`,
+                    }}
+                    title={`完成数: ${item.done}`}
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-gray-600">{item.label}</span>
+                {item.risk > 0 && (
+                  <span
+                    className="inline-flex min-w-5 items-center justify-center rounded-full border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] text-red-600"
+                    title={`风险事件: ${item.risk}`}
+                  >
+                    {item.risk}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function HealthCoachMvpPages() {
   const [page, setPage] = useState(0);
   const [submitted, setSubmitted] = useState(false);
@@ -200,9 +337,25 @@ export default function HealthCoachMvpPages() {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [historyError, setHistoryError] = useState("");
 
-  const [checkinHistory, setCheckinHistory] = useState<HistoryCheckin[]>([]);
-  const [adjustmentHistory, setAdjustmentHistory] = useState<HistoryAdjustment[]>([]);
-  const [riskHistory, setRiskHistory] = useState<HistoryRiskEvent[]>([]);
+  const [overviewCheckins, setOverviewCheckins] = useState<HistoryCheckin[]>([]);
+  const [overviewAdjustments, setOverviewAdjustments] = useState<
+    HistoryAdjustment[]
+  >([]);
+  const [overviewRisks, setOverviewRisks] = useState<HistoryRiskEvent[]>([]);
+
+  const [historyCheckins, setHistoryCheckins] = useState<HistoryCheckin[]>([]);
+  const [historyAdjustments, setHistoryAdjustments] = useState<
+    HistoryAdjustment[]
+  >([]);
+  const [historyRisks, setHistoryRisks] = useState<HistoryRiskEvent[]>([]);
+
+  const [historyView, setHistoryView] = useState<HistoryView>("all");
+  const [historySearch, setHistorySearch] = useState("");
+  const [historyStatusFilter, setHistoryStatusFilter] = useState<
+    "all" | CheckinStatus
+  >("all");
+  const [historyRiskFilter, setHistoryRiskFilter] =
+    useState<RiskLevelFilter>("all");
 
   const [generatedPlan, setGeneratedPlan] = useState<GeneratedPlan | null>(
     null
@@ -256,14 +409,14 @@ export default function HealthCoachMvpPages() {
       : fallbackPlan;
 
   const stats = useMemo(() => {
-    const totalCheckins = checkinHistory.length;
-    const doneCount = checkinHistory.filter(
+    const totalCheckins = overviewCheckins.length;
+    const doneCount = overviewCheckins.filter(
       (item) => item.checkin_status === "done"
     ).length;
-    const partialCount = checkinHistory.filter(
+    const partialCount = overviewCheckins.filter(
       (item) => item.checkin_status === "partial"
     ).length;
-    const missedCount = checkinHistory.filter(
+    const missedCount = overviewCheckins.filter(
       (item) => item.checkin_status === "missed"
     ).length;
 
@@ -276,10 +429,14 @@ export default function HealthCoachMvpPages() {
       partialCount,
       missedCount,
       completionRate,
-      riskCount: riskHistory.length,
-      adjustmentCount: adjustmentHistory.length,
+      riskCount: overviewRisks.length,
+      adjustmentCount: overviewAdjustments.length,
     };
-  }, [checkinHistory, adjustmentHistory, riskHistory]);
+  }, [overviewCheckins, overviewAdjustments, overviewRisks]);
+
+  const weeklyTrend = useMemo(() => {
+    return buildWeeklyTrend(overviewCheckins, overviewRisks);
+  }, [overviewCheckins, overviewRisks]);
 
   const nextPage = () => setPage((p) => Math.min(p + 1, 4));
   const prevPage = () => setPage((p) => Math.max(p - 1, 0));
@@ -335,9 +492,13 @@ export default function HealthCoachMvpPages() {
         );
       }
 
-      setCheckinHistory(data.checkins || []);
-      setAdjustmentHistory(data.adjustments || []);
-      setRiskHistory(data.risks || []);
+      setOverviewCheckins(data.overview?.checkins || []);
+      setOverviewAdjustments(data.overview?.adjustments || []);
+      setOverviewRisks(data.overview?.risks || []);
+
+      setHistoryCheckins(data.history?.checkins || []);
+      setHistoryAdjustments(data.history?.adjustments || []);
+      setHistoryRisks(data.history?.risks || []);
     } catch (error: any) {
       console.error("加载首页统计失败:", error);
       setOverviewError(error?.message || "加载首页统计失败");
@@ -346,12 +507,37 @@ export default function HealthCoachMvpPages() {
     }
   };
 
+  const buildHistoryQuery = () => {
+    const params = new URLSearchParams();
+
+    if (historyView !== "all") {
+      params.set("type", historyView);
+    }
+
+    if (historyStatusFilter !== "all") {
+      params.set("status", historyStatusFilter);
+    }
+
+    if (historyRiskFilter !== "all") {
+      params.set("riskLevel", historyRiskFilter);
+    }
+
+    if (historySearch.trim()) {
+      params.set("q", historySearch.trim());
+    }
+
+    params.set("limit", "20");
+
+    const query = params.toString();
+    return query ? `/api/load-history?${query}` : "/api/load-history";
+  };
+
   const handleLoadHistory = async () => {
     try {
       setIsLoadingHistory(true);
       setHistoryError("");
 
-      const res = await fetch("/api/load-history", {
+      const res = await fetch(buildHistoryQuery(), {
         method: "GET",
       });
 
@@ -363,9 +549,14 @@ export default function HealthCoachMvpPages() {
         );
       }
 
-      setCheckinHistory(data.checkins || []);
-      setAdjustmentHistory(data.adjustments || []);
-      setRiskHistory(data.risks || []);
+      setOverviewCheckins(data.overview?.checkins || []);
+      setOverviewAdjustments(data.overview?.adjustments || []);
+      setOverviewRisks(data.overview?.risks || []);
+
+      setHistoryCheckins(data.history?.checkins || []);
+      setHistoryAdjustments(data.history?.adjustments || []);
+      setHistoryRisks(data.history?.risks || []);
+
       setPage(4);
     } catch (error: any) {
       console.error("加载历史记录失败:", error);
@@ -378,6 +569,16 @@ export default function HealthCoachMvpPages() {
   useEffect(() => {
     void loadOverview();
   }, []);
+
+  useEffect(() => {
+    if (page !== 4) return;
+
+    const timer = setTimeout(() => {
+      void handleLoadHistory();
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [page, historyView, historyStatusFilter, historyRiskFilter, historySearch]);
 
   const handleGeneratePlan = async () => {
     try {
@@ -487,7 +688,7 @@ export default function HealthCoachMvpPages() {
 
   return (
     <div className="min-h-screen bg-gray-50 p-6 md:p-10">
-      <div className="mx-auto flex max-w-5xl flex-col gap-6">
+      <div className="mx-auto flex max-w-6xl flex-col gap-6">
         <div className="rounded-3xl border bg-white p-5 shadow-sm">
           <div className="flex flex-col gap-3 md:flex-row md:flex-wrap md:items-center md:justify-between">
             {pageTitles.map((_, index) => (
@@ -512,11 +713,11 @@ export default function HealthCoachMvpPages() {
             <CardContent className="space-y-6 p-8 pt-0">
               <div className="grid gap-4 md:grid-cols-4">
                 <div className="rounded-2xl border bg-gray-50 p-5">
-                  <div className="text-sm text-gray-500">最近打卡数</div>
+                  <div className="text-sm text-gray-500">最近 30 天打卡数</div>
                   <div className="mt-2 text-3xl font-semibold">
                     {stats.totalCheckins}
                   </div>
-                  <div className="mt-1 text-xs text-gray-500">基于最近 10 条记录</div>
+                  <div className="mt-1 text-xs text-gray-500">真实 30 天数据</div>
                 </div>
 
                 <div className="rounded-2xl border bg-gray-50 p-5">
@@ -550,6 +751,8 @@ export default function HealthCoachMvpPages() {
                 </div>
               </div>
 
+              <MiniTrendChart data={weeklyTrend} />
+
               {overviewError && (
                 <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-600">
                   {overviewError}
@@ -563,7 +766,7 @@ export default function HealthCoachMvpPages() {
                     <li>• 一个 7 天健康习惯计划</li>
                     <li>• 一个清晰的小目标，而不是空泛口号</li>
                     <li>• 每日打卡与简单调整建议</li>
-                    <li>• 基于真实数据的最近表现统计</li>
+                    <li>• 基于最近 30 天真实数据的统计与趋势</li>
                   </ul>
                 </div>
 
@@ -992,7 +1195,7 @@ export default function HealthCoachMvpPages() {
             <CardHeader className="p-8">
               <CardTitle className="text-2xl">历史记录页</CardTitle>
               <CardDescription className="text-base leading-7">
-                这里展示最近的打卡、调整建议和风险事件。先确认系统不是在瞎存数据，再谈体验优化。
+                这里展示最近的打卡、调整建议和风险事件。现在筛选是真的走服务端，不再是前端 10 条自娱自乐。
               </CardDescription>
             </CardHeader>
 
@@ -1015,158 +1218,256 @@ export default function HealthCoachMvpPages() {
                 </Button>
               </div>
 
+              <div className="rounded-2xl border bg-gray-50 p-5">
+                <div className="mb-4 text-sm font-medium text-gray-700">筛选器</div>
+
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                  <div className="space-y-2">
+                    <Label className="text-sm">记录类型</Label>
+                    <select
+                      className="h-11 w-full rounded-2xl border bg-white px-3 text-sm"
+                      value={historyView}
+                      onChange={(e) =>
+                        setHistoryView(e.target.value as HistoryView)
+                      }
+                    >
+                      <option value="all">全部</option>
+                      <option value="checkins">只看打卡</option>
+                      <option value="adjustments">只看调整建议</option>
+                      <option value="risks">只看风险事件</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-sm">打卡状态</Label>
+                    <select
+                      className="h-11 w-full rounded-2xl border bg-white px-3 text-sm"
+                      value={historyStatusFilter}
+                      onChange={(e) =>
+                        setHistoryStatusFilter(
+                          e.target.value as "all" | CheckinStatus
+                        )
+                      }
+                    >
+                      <option value="all">全部</option>
+                      <option value="done">做到了</option>
+                      <option value="partial">部分做到</option>
+                      <option value="missed">没做到</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-sm">风险等级</Label>
+                    <select
+                      className="h-11 w-full rounded-2xl border bg-white px-3 text-sm"
+                      value={historyRiskFilter}
+                      onChange={(e) =>
+                        setHistoryRiskFilter(e.target.value as RiskLevelFilter)
+                      }
+                    >
+                      <option value="all">全部</option>
+                      <option value="high">high</option>
+                      <option value="medium">medium</option>
+                      <option value="low">low</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-sm">关键词搜索</Label>
+                    <Input
+                      value={historySearch}
+                      onChange={(e) => setHistorySearch(e.target.value)}
+                      placeholder="搜备注、目标、风险内容"
+                      className="h-11 rounded-2xl bg-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <Button
+                    variant="secondary"
+                    className="rounded-2xl"
+                    onClick={() => {
+                      setHistoryView("all");
+                      setHistoryStatusFilter("all");
+                      setHistoryRiskFilter("all");
+                      setHistorySearch("");
+                    }}
+                  >
+                    重置筛选
+                  </Button>
+
+                  <div className="flex items-center text-sm text-gray-500">
+                    当前结果：打卡 {historyCheckins.length} 条，调整建议{" "}
+                    {historyAdjustments.length} 条，风险事件 {historyRisks.length} 条
+                  </div>
+                </div>
+              </div>
+
               {historyError && (
                 <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-600">
                   {historyError}
                 </div>
               )}
 
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold">最近打卡</h3>
-                {checkinHistory.length === 0 && !isLoadingHistory && (
-                  <div className="rounded-2xl border bg-gray-50 p-5 text-sm text-gray-600">
-                    还没有打卡记录。
-                  </div>
-                )}
-                {checkinHistory.map((item) => (
-                  <div key={item.id} className="rounded-2xl border p-5">
-                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                      <div className="text-sm text-gray-500">打卡 #{item.id}</div>
-                      <div className="text-sm text-gray-500">
-                        {formatDateTime(item.created_at)}
-                      </div>
+              {(historyView === "all" || historyView === "checkins") && (
+                <div className="space-y-4">
+                  <h3 className="text-lg font-semibold">打卡记录</h3>
+                  {historyCheckins.length === 0 && !isLoadingHistory && (
+                    <div className="rounded-2xl border bg-gray-50 p-5 text-sm text-gray-600">
+                      没有符合条件的打卡记录。
                     </div>
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <div>
-                        <div className="text-sm text-gray-500">习惯类型</div>
-                        <div className="text-base font-medium">
-                          {getHabitLabel(item.habit)}
+                  )}
+                  {historyCheckins.map((item) => (
+                    <div key={item.id} className="rounded-2xl border p-5">
+                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-sm text-gray-500">打卡 #{item.id}</div>
+                        <div className="text-sm text-gray-500">
+                          {formatDateTime(item.created_at)}
                         </div>
                       </div>
-                      <div>
-                        <div className="text-sm text-gray-500">打卡状态</div>
-                        <div className="text-base font-medium">
-                          {getStatusLabel(item.checkin_status)}
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div>
+                          <div className="text-sm text-gray-500">习惯类型</div>
+                          <div className="text-base font-medium">
+                            {getHabitLabel(item.habit)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-500">打卡状态</div>
+                          <div className="text-base font-medium">
+                            {getStatusLabel(item.checkin_status)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-500">失败原因</div>
+                          <div className="text-base">
+                            {getReasonLabel(item.checkin_reason)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-500">当天主目标</div>
+                          <div className="text-base">
+                            {item.plan_main_goal || "无"}
+                          </div>
                         </div>
                       </div>
-                      <div>
-                        <div className="text-sm text-gray-500">失败原因</div>
-                        <div className="text-base">
-                          {getReasonLabel(item.checkin_reason)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-sm text-gray-500">当天主目标</div>
-                        <div className="text-base">{item.plan_main_goal || "无"}</div>
+                      <div className="mt-4 rounded-2xl bg-gray-50 p-4">
+                        <div className="text-sm text-gray-500">备注</div>
+                        <div className="mt-1 text-base">{item.note || "无"}</div>
                       </div>
                     </div>
-                    <div className="mt-4 rounded-2xl bg-gray-50 p-4">
-                      <div className="text-sm text-gray-500">备注</div>
-                      <div className="mt-1 text-base">{item.note || "无"}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
 
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold">最近调整建议</h3>
-                {adjustmentHistory.length === 0 && !isLoadingHistory && (
-                  <div className="rounded-2xl border bg-gray-50 p-5 text-sm text-gray-600">
-                    还没有调整建议记录。
-                  </div>
-                )}
-                {adjustmentHistory.map((item) => (
-                  <div key={item.id} className="rounded-2xl border p-5">
-                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                      <div className="text-sm text-gray-500">建议 #{item.id}</div>
-                      <div className="text-sm text-gray-500">
-                        {formatDateTime(item.created_at)}
+              {(historyView === "all" || historyView === "adjustments") && (
+                <div className="space-y-4">
+                  <h3 className="text-lg font-semibold">调整建议</h3>
+                  {historyAdjustments.length === 0 && !isLoadingHistory && (
+                    <div className="rounded-2xl border bg-gray-50 p-5 text-sm text-gray-600">
+                      没有符合条件的调整建议记录。
+                    </div>
+                  )}
+                  {historyAdjustments.map((item) => (
+                    <div key={item.id} className="rounded-2xl border p-5">
+                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-sm text-gray-500">建议 #{item.id}</div>
+                        <div className="text-sm text-gray-500">
+                          {formatDateTime(item.created_at)}
+                        </div>
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div>
+                          <div className="text-sm text-gray-500">习惯类型</div>
+                          <div className="text-base font-medium">
+                            {getHabitLabel(item.habit)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-500">对应状态</div>
+                          <div className="text-base font-medium">
+                            {getStatusLabel(item.checkin_status)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-500">失败原因</div>
+                          <div className="text-base">
+                            {getReasonLabel(item.checkin_reason)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-500">当天主目标</div>
+                          <div className="text-base">
+                            {item.today_main_goal || "无"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-500">明日主目标</div>
+                          <div className="text-base">{item.tomorrow_main_goal}</div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-500">明日辅助动作</div>
+                          <div className="text-base">
+                            {item.tomorrow_support_action}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mt-4 rounded-2xl bg-gray-50 p-4">
+                        <div className="text-sm text-gray-500">调整原因</div>
+                        <div className="mt-1 text-base">{item.adjust_reason}</div>
                       </div>
                     </div>
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <div>
-                        <div className="text-sm text-gray-500">习惯类型</div>
-                        <div className="text-base font-medium">
-                          {getHabitLabel(item.habit)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-sm text-gray-500">对应状态</div>
-                        <div className="text-base font-medium">
-                          {getStatusLabel(item.checkin_status)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-sm text-gray-500">失败原因</div>
-                        <div className="text-base">
-                          {getReasonLabel(item.checkin_reason)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-sm text-gray-500">当天主目标</div>
-                        <div className="text-base">{item.today_main_goal || "无"}</div>
-                      </div>
-                      <div>
-                        <div className="text-sm text-gray-500">明日主目标</div>
-                        <div className="text-base">{item.tomorrow_main_goal}</div>
-                      </div>
-                      <div>
-                        <div className="text-sm text-gray-500">明日辅助动作</div>
-                        <div className="text-base">
-                          {item.tomorrow_support_action}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="mt-4 rounded-2xl bg-gray-50 p-4">
-                      <div className="text-sm text-gray-500">调整原因</div>
-                      <div className="mt-1 text-base">{item.adjust_reason}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
 
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold">最近风险事件</h3>
-                {riskHistory.length === 0 && !isLoadingHistory && (
-                  <div className="rounded-2xl border bg-gray-50 p-5 text-sm text-gray-600">
-                    还没有风险事件记录。
-                  </div>
-                )}
-                {riskHistory.map((item) => (
-                  <div key={item.id} className="rounded-2xl border p-5">
-                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                      <div className="text-sm text-gray-500">风险事件 #{item.id}</div>
-                      <div className="text-sm text-gray-500">
-                        {formatDateTime(item.created_at)}
+              {(historyView === "all" || historyView === "risks") && (
+                <div className="space-y-4">
+                  <h3 className="text-lg font-semibold">风险事件</h3>
+                  {historyRisks.length === 0 && !isLoadingHistory && (
+                    <div className="rounded-2xl border bg-gray-50 p-5 text-sm text-gray-600">
+                      没有符合条件的风险事件记录。
+                    </div>
+                  )}
+                  {historyRisks.map((item) => (
+                    <div key={item.id} className="rounded-2xl border p-5">
+                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-sm text-gray-500">风险事件 #{item.id}</div>
+                        <div className="text-sm text-gray-500">
+                          {formatDateTime(item.created_at)}
+                        </div>
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div>
+                          <div className="text-sm text-gray-500">来源</div>
+                          <div className="text-base font-medium">{item.source}</div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-500">风险等级</div>
+                          <div className="text-base font-medium">
+                            {item.risk_level}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-500">风险类型</div>
+                          <div className="text-base">{item.risk_type}</div>
+                        </div>
+                      </div>
+                      <div className="mt-4 rounded-2xl bg-gray-50 p-4">
+                        <div className="text-sm text-gray-500">触发内容</div>
+                        <div className="mt-1 text-base">{item.trigger_text}</div>
+                      </div>
+                      <div className="mt-4 rounded-2xl bg-red-50 p-4">
+                        <div className="text-sm text-red-600">系统动作</div>
+                        <div className="mt-1 text-base text-red-700">
+                          {item.action_text}
+                        </div>
                       </div>
                     </div>
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <div>
-                        <div className="text-sm text-gray-500">来源</div>
-                        <div className="text-base font-medium">{item.source}</div>
-                      </div>
-                      <div>
-                        <div className="text-sm text-gray-500">风险等级</div>
-                        <div className="text-base font-medium">{item.risk_level}</div>
-                      </div>
-                      <div>
-                        <div className="text-sm text-gray-500">风险类型</div>
-                        <div className="text-base">{item.risk_type}</div>
-                      </div>
-                    </div>
-                    <div className="mt-4 rounded-2xl bg-gray-50 p-4">
-                      <div className="text-sm text-gray-500">触发内容</div>
-                      <div className="mt-1 text-base">{item.trigger_text}</div>
-                    </div>
-                    <div className="mt-4 rounded-2xl bg-red-50 p-4">
-                      <div className="text-sm text-red-600">系统动作</div>
-                      <div className="mt-1 text-base text-red-700">
-                        {item.action_text}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         )}
